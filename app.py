@@ -186,6 +186,12 @@ def create_database():
     )
     cursor.execute(
         """
+        INSERT OR IGNORE INTO app_settings (setting_name, setting_value, effective_from)
+        VALUES ('employee_employer_cost_rate', '35.0', '2026-01')
+        """
+    )
+    cursor.execute(
+        """
         CREATE TABLE IF NOT EXISTS provider_vat_settings (
             provider TEXT NOT NULL,
             vat_mode TEXT NOT NULL DEFAULT 'Plus VAT',
@@ -1257,6 +1263,16 @@ def build_monthly_rows(therapists):
         else:
             employment = "Not set"
 
+        employer_cost_rate = load_setting(
+            "employee_employer_cost_rate", SALARY_MONTH, 35.0
+        ) / 100.0
+        employer_expense = (
+            result["subtotal"] * employer_cost_rate
+            if employment == "Employee"
+            else 0.0
+        )
+        total_employment_cost = result["subtotal"] + employer_expense
+
         rows.append(
             {
                 "Name": therapist_name,
@@ -1269,9 +1285,11 @@ def build_monthly_rows(therapists):
                 "Subtotal": result["subtotal"],
                 "VAT": result["vat"],
                 "Total": result["total"],
+                "Employer expense": employer_expense,
+                "Total employment cost": total_employment_cost,
                 "Clinic pre VAT": clinic["total_pre_vat"],
                 "Clinic incl VAT": clinic["total_incl_vat"],
-                "Profit pre VAT": clinic["total_pre_vat"] - result["subtotal"],
+                "Profit pre VAT": clinic["total_pre_vat"] - total_employment_cost,
                 "Profile saved": (
                     "Yes" if profile else "No"
                 ),
@@ -1410,18 +1428,21 @@ if page == "💰 Monthly Salaries":
         "VAT": f"₪{r['VAT']:,.2f}",
         "Salary pre VAT": f"₪{r['Subtotal']:,.2f}",
         "Salary incl VAT": f"₪{r['Total']:,.2f}",
+        "Employer expense": f"₪{r['Employer expense']:,.2f}",
+        "Total employment cost": f"₪{r['Total employment cost']:,.2f}",
         "Clinic income pre VAT": f"₪{r['Clinic pre VAT']:,.2f}",
         "Clinic income incl VAT": f"₪{r['Clinic incl VAT']:,.2f}",
         "Profit pre VAT": f"₪{r['Profit pre VAT']:,.2f}",
         "Profile saved": r["Profile saved"],
     } for r in visible_rows]
     st.dataframe(table_rows, use_container_width=True, hide_index=True)
-    t1, t2, t3, t4, t5 = st.columns(5)
+    t1, t2, t3, t4, t5, t6 = st.columns(6)
     t1.metric("Salary pre VAT", f"₪{sum(r['Subtotal'] for r in visible_rows):,.2f}")
-    t2.metric("Salary incl VAT", f"₪{sum(r['Total'] for r in visible_rows):,.2f}")
-    t3.metric("Clinic income pre VAT", f"₪{sum(r['Clinic pre VAT'] for r in visible_rows):,.2f}")
-    t4.metric("Clinic income incl VAT", f"₪{sum(r['Clinic incl VAT'] for r in visible_rows):,.2f}")
-    t5.metric("Profit pre VAT", f"₪{sum(r['Profit pre VAT'] for r in visible_rows):,.2f}")
+    t2.metric("Employer expense", f"₪{sum(r['Employer expense'] for r in visible_rows):,.2f}")
+    t3.metric("Total employment cost", f"₪{sum(r['Total employment cost'] for r in visible_rows):,.2f}")
+    t4.metric("Clinic income pre VAT", f"₪{sum(r['Clinic pre VAT'] for r in visible_rows):,.2f}")
+    t5.metric("Clinic income incl VAT", f"₪{sum(r['Clinic incl VAT'] for r in visible_rows):,.2f}")
+    t6.metric("Profit pre VAT", f"₪{sum(r['Profit pre VAT'] for r in visible_rows):,.2f}")
 
     if filter_choice == "Employees":
         employee_rows = [r for r in visible_rows if r["Profile saved"] == "Yes"]
@@ -1451,12 +1472,24 @@ if page == "💰 Monthly Salaries":
         if not profile:
             st.warning("This therapist does not have a saved profile yet.")
         else:
-            info1, info2, info3, info4, info5 = st.columns(5)
+            employer_cost_rate = load_setting(
+                "employee_employer_cost_rate", SALARY_MONTH, 35.0
+            ) / 100.0
+            employer_expense = (
+                result["subtotal"] * employer_cost_rate
+                if profile["employment_type"] == "Employee"
+                else 0.0
+            )
+            total_employment_cost = result["subtotal"] + employer_expense
+            profit_pre_vat = clinic["total_pre_vat"] - total_employment_cost
+
+            info1, info2, info3, info4, info5, info6 = st.columns(6)
             info1.metric("Employment", profile["employment_type"])
             info2.metric("Salary pre VAT", f"₪{result['subtotal']:,.2f}")
-            info3.metric("Salary incl VAT", f"₪{result['total']:,.2f}")
-            info4.metric("Clinic income pre VAT", f"₪{clinic['total_pre_vat']:,.2f}")
-            info5.metric("Profit pre VAT", f"₪{clinic['total_pre_vat'] - result['subtotal']:,.2f}")
+            info3.metric("Employer expense", f"₪{employer_expense:,.2f}")
+            info4.metric("Total employment cost", f"₪{total_employment_cost:,.2f}")
+            info5.metric("Clinic income pre VAT", f"₪{clinic['total_pre_vat']:,.2f}")
+            info6.metric("Profit pre VAT", f"₪{profit_pre_vat:,.2f}")
 
             if result["pay_info"]["pay_structure"] in (
                 "Fixed monthly salary", "Fixed salary + activity"
@@ -1486,7 +1519,13 @@ if page == "💰 Monthly Salaries":
                 clinic_row = next((r for r in clinic["rows"] if r["activity"] == activity and r["provider"] == provider and r["patient_payment"] == patient_payment and r["count"] == count), None)
                 clinic_pre_vat = clinic_row["income_pre_vat"] if clinic_row else 0.0
                 clinic_incl_vat = clinic_row["income_incl_vat"] if clinic_row else 0.0
-                activity_profit = clinic_pre_vat - therapist_pay
+                activity_employer_expense = (
+                    therapist_pay * employer_cost_rate
+                    if profile["employment_type"] == "Employee"
+                    else 0.0
+                )
+                activity_total_cost = therapist_pay + activity_employer_expense
+                activity_profit = clinic_pre_vat - activity_total_cost
                 breakdown.append({
                     "Activity": activity,
                     "Provider": provider,
@@ -1495,6 +1534,8 @@ if page == "💰 Monthly Salaries":
                     "Provider rate": f"₪{provider_rate:,.2f}",
                     "Patient payment": f"₪{patient_payment:,.2f}",
                     "Therapist pay pre VAT": f"₪{therapist_pay:,.2f}",
+                    "Employer expense": f"₪{activity_employer_expense:,.2f}",
+                    "Total therapist cost": f"₪{activity_total_cost:,.2f}",
                     "Clinic income pre VAT": f"₪{clinic_pre_vat:,.2f}",
                     "Clinic income incl VAT": f"₪{clinic_incl_vat:,.2f}",
                     "Activity profit pre VAT": (f"₪{activity_profit:,.2f}" if result["pay_info"]["pay_structure"] == "Per activity" else "Included in monthly total"),
@@ -1819,6 +1860,37 @@ elif page == "⚙ Settings":
         st.success("VAT setting saved.")
         st.rerun()
     st.caption("Tipulog patient-payment amounts are treated as VAT-inclusive receipts. Provider rates use the VAT treatment saved on each provider profile.")
+
+    st.divider()
+    st.subheader("Employee employer expense")
+    current_employer_cost = load_setting(
+        "employee_employer_cost_rate", SALARY_MONTH, 35.0
+    )
+    employer_cost_value = st.number_input(
+        "Additional employer expense (%)",
+        min_value=0.0,
+        max_value=200.0,
+        value=float(current_employer_cost),
+        step=0.5,
+        format="%.1f",
+    )
+    employer_cost_effective = st.text_input(
+        "Employer expense effective from",
+        value=SALARY_MONTH,
+        key="employer_cost_effective",
+    )
+    if st.button("Save employer expense setting", type="primary"):
+        save_setting(
+            "employee_employer_cost_rate",
+            employer_cost_value,
+            employer_cost_effective,
+        )
+        st.success("Employer expense setting saved.")
+        st.rerun()
+    st.caption(
+        "Applied only to employees. Freelancers receive no additional employer-cost percentage. "
+        "Profit uses clinic income before VAT minus total employment cost."
+    )
 
     st.divider()
     st.subheader("Archived Therapists")
